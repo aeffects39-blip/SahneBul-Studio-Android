@@ -45,6 +45,12 @@ jobs:
           pip install --upgrade pip
           pip install buildozer cython==0.29.36
 
+      - name: Python sürümünü 3.11'e sabitle (Kivy 3.14 ile derlenmiyor)
+        working-directory: ${{ steps.konum.outputs.dir }}
+        run: |
+          sed -i -E '/^requirements *=/ s/(=|,) *python3 *(,|$)/\1python3==3.11.5,hostpython3==3.11.5\2/' buildozer.spec
+          grep -n '^requirements' buildozer.spec
+
       - name: APK derle
         working-directory: ${{ steps.konum.outputs.dir }}
         run: |
