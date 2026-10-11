@@ -1,224 +1,117 @@
 # -*- coding: utf-8 -*-
-"""
-SahneBul Studio — Android MVP: sadece video indirme.
-Kivy + yt-dlp (Python kütüphanesi olarak kullanılır, .exe değil).
-
-ÖNEMLİ SINIRLAMA:
-ffmpeg Android tarafına henüz dahil edilmedi. Bu yüzden yalnızca
-"tek parçada" (hem görüntü hem ses aynı dosyada) gelen formatlar
-listelenir. YouTube gibi sitelerde en yüksek çözünürlükler genelde
-görüntü/ses ayrı akış halinde gelir ve BİRLEŞTİRME için ffmpeg gerekir
-— bu MVP'de kapsam dışıdır (sonraki adımda FFmpegKit eklenebilir).
-"""
-import os
+"""SahneBul İndirici (mobil) — Flet arayüzü."""
 import threading
 
-import yt_dlp
-from kivy.app import App
-from kivy.clock import mainthread
-from kivy.lang import Builder
-from kivy.properties import StringProperty, NumericProperty, BooleanProperty, ListProperty
-from kivy.uix.boxlayout import BoxLayout
+import flet as ft
 
-try:
-    from android.storage import app_storage_path  # type: ignore
-    ANDROID = True
-except Exception:
-    ANDROID = False
+import core
 
 
-def indirme_klasoru():
-    if ANDROID:
-        taban = app_storage_path()
-    else:
-        taban = os.path.join(os.path.expanduser("~"), "SahneBulIndirmeler")
-    yol = os.path.join(taban, "Indirilenler")
-    os.makedirs(yol, exist_ok=True)
-    return yol
+def main(page: ft.Page):
+    page.title = "SahneBul İndirici"
+    page.theme_mode = ft.ThemeMode.DARK
+    page.padding = 16
+    page.scroll = ft.ScrollMode.AUTO
 
+    durum = {"bilgi": None, "secim": 0, "iptal": threading.Event(), "mesgul": False}
 
-KV = """
-<Kok>:
-    orientation: "vertical"
-    padding: dp(16)
-    spacing: dp(10)
+    link = ft.TextField(label="Video linki", hint_text="https://…", expand=True)
+    analiz_btn = ft.ElevatedButton("Analiz")
+    resim = ft.Image(width=320, border_radius=12, visible=False)
+    baslik = ft.Text(size=16, weight=ft.FontWeight.BOLD)
+    kanal = ft.Text(size=12, opacity=0.7)
+    kaliteler = ft.Column(spacing=6)
+    indir_btn = ft.FilledButton("İndir", visible=False)
+    iptal_btn = ft.OutlinedButton("İptal", visible=False)
+    bar = ft.ProgressBar(value=0, visible=False)
+    durum_txt = ft.Text("Hazır", size=12, opacity=0.7)
 
-    BoxLayout:
-        size_hint_y: None
-        height: dp(48)
-        spacing: dp(8)
-        TextInput:
-            id: link
-            hint_text: "https://... video linki"
-            multiline: False
-            size_hint_x: 0.75
-        Button:
-            text: "Analiz Et"
-            size_hint_x: 0.25
-            on_release: root.analiz_et()
+    def mesaj(m):
+        page.snack_bar = ft.SnackBar(ft.Text(m))
+        page.snack_bar.open = True
+        page.update()
 
-    Label:
-        id: baslik_lbl
-        text: root.baslik
-        size_hint_y: None
-        height: dp(60) if root.baslik else 0
-        text_size: self.width, None
-        halign: "left"
-        valign: "top"
+    def kalite_ciz():
+        kaliteler.controls.clear()
+        for i, k in enumerate(durum["bilgi"]["kaliteler"]):
+            secili = i == durum["secim"]
+            kaliteler.controls.append(ft.Container(
+                content=ft.Row([ft.Text(k["ad"], weight=ft.FontWeight.BOLD, expand=True),
+                                ft.Text(k["boyut"], size=12, opacity=0.7)]),
+                padding=12, border_radius=12,
+                bgcolor=ft.Colors.with_opacity(0.18 if secili else 0.06, ft.Colors.CYAN),
+                border=ft.border.all(2 if secili else 1, ft.Colors.CYAN if secili else ft.Colors.WHITE24),
+                on_click=lambda e, i=i: sec(i)))
+        page.update()
 
-    Spinner:
-        id: kalite
-        text: "Kalite seç"
-        values: root.kalite_listesi
-        size_hint_y: None
-        height: dp(44)
-        disabled: not root.kalite_listesi
+    def sec(i):
+        durum["secim"] = i
+        kalite_ciz()
 
-    Button:
-        text: "İndiriliyor…" if root.indiriyor else "↓  İndir"
-        size_hint_y: None
-        height: dp(52)
-        disabled: root.indiriyor or not root.kalite_listesi
-        on_release: root.indir_baslat()
+    def analiz_et(e):
+        url = link.value.strip()
+        if not url.lower().startswith(("http://", "https://")):
+            return mesaj("Geçerli bir http(s) linki gir.")
+        analiz_btn.disabled = True
+        durum_txt.value = "Analiz ediliyor…"
+        page.update()
 
-    ProgressBar:
-        id: pb
-        max: 100
-        value: root.yuzde
-        size_hint_y: None
-        height: dp(20)
+        def is_():
+            try:
+                b = core.analiz(url)
+                durum.update(bilgi=b, secim=0)
+                baslik.value, kanal.value = b["baslik"], f"{b['kanal']}  ·  {b['sure']}"
+                resim.src, resim.visible = b["resim"], bool(b["resim"])
+                indir_btn.visible = True
+                durum_txt.value = "Kaliteyi seç ve indir"
+                kalite_ciz()
+            except Exception as ex:
+                durum_txt.value = "Hata"
+                mesaj("Analiz başarısız: " + str(ex)[:150])
+            analiz_btn.disabled = False
+            page.update()
+        threading.Thread(target=is_, daemon=True).start()
 
-    Label:
-        id: durum_lbl
-        text: root.durum
-        size_hint_y: None
-        height: dp(28)
+    def ilerleme(yuzde, metin):
+        bar.value = yuzde / 100
+        durum_txt.value = metin
+        page.update()
 
-    Widget:
-"""
-
-
-class Kok(BoxLayout):
-    baslik = StringProperty("")
-    durum = StringProperty("Hazır")
-    yuzde = NumericProperty(0)
-    indiriyor = BooleanProperty(False)
-    kalite_listesi = ListProperty([])
-
-    def __init__(self, **kw):
-        super().__init__(**kw)
-        self._bilgi = None
-        self._formatlar = {}   # "720p mp4 (45 MB)" -> format_id
-
-    # ---------------------------------------------------------------- Analiz
-    def analiz_et(self):
-        link = self.ids.link.text.strip()
-        if not link.lower().startswith(("http://", "https://")):
-            self.durum = "Geçerli bir link girin."
+    def indir(e):
+        if durum["mesgul"] or not durum["bilgi"]:
             return
-        self.durum = "Analiz ediliyor…"
-        self.kalite_listesi = []
-        self.ids.kalite.text = "Kalite seç"
-        threading.Thread(target=self._analiz_isci, args=(link,), daemon=True).start()
+        k = durum["bilgi"]["kaliteler"][durum["secim"]]
+        durum.update(mesgul=True)
+        durum["iptal"].clear()
+        indir_btn.disabled, iptal_btn.visible, bar.visible = True, True, True
+        bar.value = 0
+        page.update()
 
-    def _analiz_isci(self, link):
-        try:
-            opts = {"quiet": True, "no_warnings": True, "skip_download": True}
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(link, download=False)
-            if info.get("_type") == "playlist":
-                girdi = info.get("entries") or []
-                if not girdi:
-                    raise RuntimeError("Video bulunamadı.")
-                info = girdi[0]
-            self._analiz_tamam(info)
-        except Exception as e:
-            self._analiz_hata(str(e))
+        def is_():
+            try:
+                yol = core.indir(durum["bilgi"]["url"], k, core.indirme_klasoru(), ilerleme, durum["iptal"])
+                mesaj("İndirildi: " + (yol.split("/")[-1] if yol else "tamam"))
+            except core.Iptal:
+                durum_txt.value = "İptal edildi"
+            except Exception as ex:
+                durum_txt.value = "Hata"
+                mesaj(str(ex)[:200])
+            durum["mesgul"] = False
+            indir_btn.disabled, iptal_btn.visible = False, False
+            page.update()
+        threading.Thread(target=is_, daemon=True).start()
 
-    @mainthread
-    def _analiz_tamam(self, info):
-        self._bilgi = info
-        self.baslik = info.get("title") or "Başlıksız video"
-        formatlar = [f for f in (info.get("formats") or [])
-                     if f.get("vcodec") not in (None, "none") and f.get("acodec") not in (None, "none")]
-        formatlar.sort(key=lambda f: f.get("height") or 0, reverse=True)
-        self._formatlar = {}
-        etiketler = []
-        for f in formatlar:
-            h = f.get("height") or 0
-            ext = f.get("ext") or "mp4"
-            boyut = f.get("filesize") or f.get("filesize_approx") or 0
-            mb = f"{boyut / 1048576:.0f} MB" if boyut else "boyut bilinmiyor"
-            etiket = f"{h}p · {ext} · {mb}"
-            etiketler.append(etiket)
-            self._formatlar[etiket] = f["format_id"]
-        if not etiketler:
-            etiketler = ["En iyi kalite (otomatik)"]
-            self._formatlar[etiketler[0]] = "best"
-        self.kalite_listesi = etiketler
-        self.durum = "Hazır — kalite seç ve indir"
+    analiz_btn.on_click = analiz_et
+    link.on_submit = analiz_et
+    indir_btn.on_click = indir
+    iptal_btn.on_click = lambda e: durum["iptal"].set()
 
-    @mainthread
-    def _analiz_hata(self, hata):
-        self.durum = "Hata: " + hata[:120]
-
-    # ---------------------------------------------------------------- İndirme
-    def indir_baslat(self):
-        secili = self.ids.kalite.text
-        if secili not in self._formatlar or not self._bilgi:
-            self.durum = "Önce bir kalite seç."
-            return
-        self.indiriyor = True
-        self.yuzde = 0
-        self.durum = "İndirme başlıyor…"
-        fid = self._formatlar[secili]
-        url = self._bilgi.get("webpage_url") or self.ids.link.text.strip()
-        threading.Thread(target=self._indir_isci, args=(url, fid), daemon=True).start()
-
-    def _indir_isci(self, url, fid):
-        try:
-            cikti = indirme_klasoru()
-            opts = {
-                "format": fid,
-                "outtmpl": os.path.join(cikti, "%(title).150s.%(ext)s"),
-                "noplaylist": True,
-                "quiet": True,
-                "no_warnings": True,
-                "progress_hooks": [self._ilerleme],
-            }
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([url])
-            self._indir_bitti(True, cikti)
-        except Exception as e:
-            self._indir_bitti(False, str(e))
-
-    def _ilerleme(self, d):
-        if d.get("status") == "downloading":
-            toplam = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-            indirilen = d.get("downloaded_bytes") or 0
-            yuzde = (indirilen / toplam * 100) if toplam else 0
-            self._ilerleme_guncelle(yuzde)
-
-    @mainthread
-    def _ilerleme_guncelle(self, yuzde):
-        self.yuzde = yuzde
-        self.durum = f"İndiriliyor… %{yuzde:.0f}"
-
-    @mainthread
-    def _indir_bitti(self, basarili, bilgi):
-        self.indiriyor = False
-        if basarili:
-            self.yuzde = 100
-            self.durum = "Tamamlandı: " + bilgi
-        else:
-            self.durum = "Hata: " + str(bilgi)[:120]
+    page.add(
+        ft.Text("SahneBul İndirici", size=24, weight=ft.FontWeight.BOLD),
+        ft.Row([link, analiz_btn]),
+        resim, baslik, kanal, kaliteler,
+        ft.Row([indir_btn, iptal_btn]), bar, durum_txt,
+    )
 
 
-class SahneBulApp(App):
-    def build(self):
-        Builder.load_string(KV)
-        return Kok()
-
-
-if __name__ == "__main__":
-    SahneBulApp().run()
+ft.app(target=main)

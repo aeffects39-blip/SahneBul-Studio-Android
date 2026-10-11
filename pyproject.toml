@@ -1,0 +1,14 @@
+[project]
+name = "sahnebul-indirici"
+version = "0.1.0"
+description = "SahneBul video indirici"
+requires-python = ">=3.10"
+dependencies = ["flet", "yt-dlp"]
+
+[tool.flet]
+product = "SahneBul İndirici"
+org = "com.sahnebul"
+
+[tool.flet.android.permission]
+"android.permission.INTERNET" = true
+"android.permission.WRITE_EXTERNAL_STORAGE" = true
