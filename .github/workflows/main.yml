@@ -1,0 +1,70 @@
+name: APK Derle
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Kodu çek
+        uses: actions/checkout@v4
+
+      - name: Proje klasörünü bul (pyproject.toml + main.py)
+        id: konum
+        run: |
+          DOSYA=$(grep -rl --include=pyproject.toml '\[tool.flet\]' . 2>/dev/null | grep -v '/.git/' | head -n1)
+          if [ -z "$DOSYA" ]; then
+            echo "HATA: [tool.flet] içeren pyproject.toml bulunamadı." >&2
+            find . -not -path './.git/*' -maxdepth 3
+            exit 1
+          fi
+          DIR=$(dirname "$DOSYA")
+          echo "Proje klasörü: $DIR"
+          ls -la "$DIR"
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Java kur
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Python kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Flutter kur
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Flet kur
+        run: |
+          python -m pip install --upgrade pip
+          pip install flet yt-dlp
+          flet --version
+
+      - name: APK derle
+        working-directory: ${{ steps.konum.outputs.dir }}
+        run: flet build apk --verbose
+
+      - name: Hata olursa log yükle
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: derleme-log
+          path: |
+            ${{ steps.konum.outputs.dir }}/build/**/*.log
+          if-no-files-found: ignore
+
+      - name: APK'yı yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: sahnebul-apk
+          path: ${{ steps.konum.outputs.dir }}/build/apk/*.apk
+          if-no-files-found: error
