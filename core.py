@@ -2,15 +2,21 @@
 """Arayüzsüz çekirdek: yt_dlp modülüyle analiz + indirme (ffmpeg gerektirmez)."""
 import os
 import re
+import shutil
 import threading
 
 import yt_dlp
 
-UCRETSIZ_MAX = 720
 
 
 class Iptal(Exception):
     pass
+
+
+def temiz(metin):
+    """Terminal renk kodlarını sil, son satırı döndür."""
+    m = re.sub(r"\x1b\[[0-9;]*m|\[[0-9;]*m", "", str(metin)).strip().splitlines()
+    return (m[-1] if m else "")[:300]
 
 
 def indirme_klasoru():
@@ -40,6 +46,9 @@ def sure_yaz(sn):
     return f"{sa}:{dk:02d}:{sn:02d}" if sa else f"{dk}:{sn:02d}"
 
 
+FFMPEG = shutil.which("ffmpeg")      # masaüstünde varsa birleştirme yapılır; Android'de genelde yok
+
+
 def analiz(url):
     """Video bilgisini ve kalite seçeneklerini döndürür."""
     with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "noplaylist": True}) as y:
@@ -52,26 +61,35 @@ def analiz(url):
             b = f["tbr"] * 1000 / 8 * sure
         return b or 0
 
-    # ffmpeg olmadan yalnızca ses+görüntü birleşik (progressive) formatlar indirilebilir
     gruplar = {}
     for f in info.get("formats") or []:
-        if f.get("vcodec") in (None, "none") or f.get("acodec") in (None, "none"):
+        if f.get("vcodec") in (None, "none"):
+            continue
+        sesli = f.get("acodec") not in (None, "none")
+        if not sesli and not FFMPEG:          # ffmpeg yok: yalnızca sesli+görüntülü tek dosya
             continue
         h = f.get("height") or 0
-        if h and (h not in gruplar or (f.get("tbr") or 0) > (gruplar[h].get("tbr") or 0)):
-            gruplar[h] = f
-    kaliteler = [dict(tur="video", ad=f"{h}p", h=h, fid=str(f["format_id"]), boyut=boyut_yaz(boyut(f)))
-                 for h, f in sorted(gruplar.items(), reverse=True)]
-    kaliteler.append(dict(tur="ses", ad="Sadece ses (m4a)", h=0, fid="bestaudio[ext=m4a]/bestaudio",
+        if not h:
+            continue
+        puan = (1 if sesli else 0, f.get("tbr") or 0)
+        if h not in gruplar or puan > gruplar[h][0]:
+            gruplar[h] = (puan, f, sesli)
+
+    kaliteler = []
+    for h, (_, f, sesli) in sorted(gruplar.items(), reverse=True):
+        fid = str(f["format_id"]) if sesli else f"{f['format_id']}+bestaudio[ext=m4a]/{f['format_id']}+bestaudio"
+        kaliteler.append(dict(tur="video", ad=f"{h}p", h=h, fid=fid, boyut=boyut_yaz(boyut(f))))
+    if not kaliteler:                          # hiç uygun format yok: yt-dlp'nin kendi seçimine bırak
+        kaliteler.append(dict(tur="video", ad="Otomatik (en iyi)", h=0, fid="b/best", boyut=""))
+    kaliteler.append(dict(tur="ses", ad="Sadece ses (m4a)", h=0, fid="bestaudio[ext=m4a]/bestaudio/best",
                           boyut=""))
     return dict(url=url, baslik=info.get("title") or "Başlıksız", kanal=info.get("uploader") or "",
-                sure=sure_yaz(sure), resim=info.get("thumbnail"), kaliteler=kaliteler)
+                sure=sure_yaz(sure), resim=info.get("thumbnail"), kaliteler=kaliteler, ffmpeg=bool(FFMPEG))
 
 
-def indir(url, kalite, klasor, ilerleme, iptal_olayi: threading.Event, premium=False):
+def indir(url, kalite, klasor, ilerleme, iptal_olayi: threading.Event):
     """ilerleme(yuzde, metin) çağrılır. Dönen değer: indirilen dosyanın yolu."""
-    if kalite["tur"] == "video" and kalite["h"] > UCRETSIZ_MAX and not premium:
-        raise RuntimeError(f"{UCRETSIZ_MAX}p üzeri Premium'a özel.")
+    os.makedirs(klasor, exist_ok=True)
     sonuc = {"yol": ""}
 
     def hook(d):
@@ -87,14 +105,40 @@ def indir(url, kalite, klasor, ilerleme, iptal_olayi: threading.Event, premium=F
             sonuc["yol"] = d.get("filename", "")
             ilerleme(100, "Tamamlandı")
 
-    opts = {"format": kalite["fid"], "outtmpl": os.path.join(klasor, "%(title).150s.%(ext)s"),
-            "noplaylist": True, "quiet": True, "no_warnings": True, "retries": 10,
-            "windowsfilenames": True, "progress_hooks": [hook]}
-    try:
-        with yt_dlp.YoutubeDL(opts) as y:
-            y.download([url])
-    except yt_dlp.utils.DownloadError as e:
+    h = kalite.get("h") or 0
+    # 403 gelirse YouTube'un farklı istemcileriyle ve yüksekliğe göre genel format seçimiyle yeniden dene
+    denemeler = [(kalite["fid"], None)]
+    if kalite["tur"] == "video":
+        genel = f"b[height<={h}]/b" if h else "b"
+        denemeler += [(genel, ["tv"]), (genel, ["ios"]), (genel, ["android_vr"]), (genel, ["web_safari"])]
+    else:
+        denemeler += [("bestaudio/best", ["tv"]), ("bestaudio/best", ["ios"]), ("bestaudio/best", ["android_vr"])]
+
+    son_hata = ""
+    for fid, istemci in denemeler:
         if iptal_olayi.is_set():
             raise Iptal()
-        raise RuntimeError(str(e).splitlines()[-1][:300])
-    return sonuc["yol"]
+        opts = {"format": fid, "outtmpl": os.path.join(klasor, "%(title).150s.%(ext)s"),
+                "noplaylist": True, "quiet": True, "no_warnings": True, "no_color": True, "retries": 5,
+                "windowsfilenames": True, "progress_hooks": [hook]}
+        if istemci:
+            opts["extractor_args"] = {"youtube": {"player_client": istemci}}
+        if FFMPEG:
+            opts["merge_output_format"] = "mp4"
+        try:
+            with yt_dlp.YoutubeDL(opts) as y:
+                bilgi = y.extract_info(url, download=True)
+                try:
+                    sonuc["yol"] = (bilgi.get("requested_downloads") or [{}])[0].get("filepath") or \
+                        y.prepare_filename(bilgi)
+                except Exception:
+                    pass
+            return sonuc["yol"]
+        except yt_dlp.utils.DownloadError as e:
+            if iptal_olayi.is_set():
+                raise Iptal()
+            son_hata = temiz(str(e))
+            ilerleme(0, "Yeniden deneniyor…")
+            if "403" not in son_hata and "not available" not in son_hata.lower() and "Forbidden" not in son_hata:
+                break                      # 403 / format yok dışındaki hatalarda tekrar denemenin anlamı yok
+    raise RuntimeError(son_hata or "İndirme başarısız.")
